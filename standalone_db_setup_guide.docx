@@ -1,0 +1,603 @@
+Standalone DB Setup Guide
+
+OS: projects/rhel-cloud/global/images/rhel-9-v20250709
+VM Size: n2-highmem-16 (16 vCPUs, 128 GB Memory)
+
+
+Infrastructure Creation Steps:
+Navigate to the https://source.corp.google.com/piper///depot/google3/storage/alloydb/nova/test/gce/ folder and modify the cluster.sh file to specify the project and cluster name and os_image
+OR
+alternatively we can directly update variable of project and cluster-name and os_image  in defaults.conf
+Execute the command: ./cluster-setup.sh create nodes=db:1,external:1.
+Update the terraform/variables.tf file variable os_image with value projects/rhel-cloud/global/images/rhel-9-v20250709.
+This command provisions 1 DB Node.
+Please run gcloud auth login and gcloud auth application-default login before running any gcloud or terraform command.
+
+Log in to DB Node:
+
+ssh -i ~/.ssh/google_compute_engine ${USER}_google_com@nic0.aman-db1.us-central1-c.c.alloydb-nova-tvc-sandbox.internal.gcpnode.com> ssh -i ~/.ssh/google_compute_engine 
+
+Installation Steps for Standalone DB:
+
+sudo tee -a /etc/yum.repos.d/artifact-registry-plugin.repo << EOF
+[ar-plugin]
+name=Artifact Registry Plugin
+baseurl=https://packages.cloud.google.com/yum/repos/dnf-plugin-artifact-registry-stable
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=http://dl.google.com/linux/linux_signing_key.pub
+EOF
+
+sudo dnf install dnf-plugin-artifact-registry -y;
+
+sudo tee -a /etc/yum.repos.d/artifact-registry.repo << EOF
+[nova]
+name=My Repository
+baseurl=https://us-central1-yum.pkg.dev/projects/alloydb-omni-sandbox/nova
+enabled=1
+repo_gpgcheck=0
+gpgcheck=1
+gpgkey=http://dl.google.com/linux/linux_signing_key.pub
+EOF
+
+sudo dnf makecache -y;
+sudo dnf install alloydbomni -y;
+pg_repo=https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/;
+sudo dnf install -y $pg_repo/pgdg-redhat-repo-latest.noarch.rpm;
+sudo dnf install -y postgresql16;
+sudo setenforce 0;
+sudo firewall-cmd --add-port=5432/tcp --permanent;
+sudo firewall-cmd --reload;
+sudo rm -rf /var/lib/postgresql/16/main;
+sudo PGPASSWORD=abcdefgh /usr/lib/postgresql/16/bin/alloydbomni-16-setup initdb;
+sudo systemctl enable alloydbomni-16;
+sudo systemctl start alloydbomni-16;
+sudo systemctl status alloydbomni-16;
+
+
+Connection to Standalone DB:
+
+
+PGPASSWORD=abcdefgh psql -h localhost -d postgres -U postgres -c 'select 1;'
+Output:
+[mehtaaman_google_com@aman-db1 ~]$ PGPASSWORD=abcdefgh psql -h localhost -d postgres -U postgres -c 'select 1;'
+ ?column? 
+----------
+        1
+(1 row)
+
+
+
+
+Installation of Monitoring on Standalone DB:
+
+	sudo dnf install alloydbomni_monitor -y;
+	sudo systemctl enable alloydbomni_monitor;
+sudo systemctl start alloydbomni_monitor;
+sudo systemctl status alloydbomni_monitor;
+
+Verify Metrics for Standalone DB:
+
+	curl http://{{NODE_IP}}:9187/metrics
+
+	Output:
+ 	[mehtaaman_google_com@aman-db1 ~]$ curl http://10.1.0.2:9187/metrics
+# HELP alloydb_omni_database_postgresql_backends The number of active and idle connections to the AlloyDB Omni instance.
+# TYPE alloydb_omni_database_postgresql_backends gauge
+alloydb_omni_database_postgresql_backends 1 1752218152245
+# HELP alloydb_omni_database_postgresql_backends_for_top_databases The current number of connections to the instance per database.
+# TYPE alloydb_omni_database_postgresql_backends_for_top_databases gauge
+alloydb_omni_database_postgresql_backends_for_top_databases{database="alloydbadmin"} 1 1752218177081
+# HELP alloydb_omni_database_postgresql_deadlock_for_top_databases_count_total The number of deadlocks per database.
+# TYPE alloydb_omni_database_postgresql_deadlock_for_top_databases_count_total counter
+alloydb_omni_database_postgresql_deadlock_for_top_databases_count_total{database="alloydbadmin"} 0 1752218191573
+
+Log in to External Node:
+
+ssh -i ~/.ssh/google_compute_engine ${USER}_google_com@nic0.aman-external1.us-central1-c.c.alloydb-nova-tvc-sandbox.internal.gcpnode.com
+
+
+
+Setup pgbackrest for External Node:
+
+
+sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm;
+	sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+	sudo dnf makecache;
+    	sudo dnf -y install pgbackrest;
+	sudo groupadd pgbackrest;
+ 	sudo adduser -g pgbackrest -n pgbackrest;
+	sudo mkdir -p /data/backup;
+sudo mkdir -p /var/log/pgbackrest;
+sudo chown pgbackrest:pgbackrest /data/backup;
+sudo chown pgbackrest:pgbackrest /var/log/pgbackrest;
+sudo chmod 750 /var/log/pgbackrest;
+Find Postgres Data Directory and Postgres Socket Path by connecting to postgres DB and running below command
+	[mehtaaman_google_com@aman-db1 ~]$ PGPASSWORD=abcdefgh psql -h localhost -d postgres -U postgres;
+psql (16.9, server 16.8)
+Type "help" for help.
+
+postgres=# SHOW data_directory;
+       data_directory        
+-----------------------------
+ /var/lib/postgresql/16/data
+(1 row)
+
+postgres=# SHOW unix_socket_directories;
+ unix_socket_directories  
+--------------------------
+ /var/run/postgresql,/tmp
+(1 row)
+
+postgres=# exit
+
+	Put below data in file /etc/pgbackrest.conf
+	sudo vi /etc/pgbackrest.conf
+	
+[global]
+repo1-path=/data/backup
+log-level-file=info
+start-fast=y
+archive-copy=y
+
+[standalone]
+pg1-host=aman-db1
+pg1-user=postgres
+pg1-path=/var/lib/postgresql/16/data
+pg1-socket-path=/var/run/postgresql,/tmp
+
+
+	
+
+	sudo chown pgbackrest:pgbackrest /etc/pgbackrest.conf;
+	sudo -u pgbackrest chmod 640 /etc/pgbackrest.conf;
+	
+Setup pgbackrest for DB Node:
+
+
+	sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+	sudo dnf makecache;
+    	sudo dnf -y install pgbackrest;
+
+	Put below data in file /etc/pgbackrest.conf
+	sudo vi /etc/pgbackrest.conf
+
+	[global]
+repo1-host=aman-external1
+repo1-host-user=pgbackrest
+repo1-path=/data/backup
+
+[standalone]
+pg1-path=/var/lib/postgresql/16/data
+
+
+	sudo chown postgres:postgres /etc/pgbackrest.conf;
+	sudo -u postgres chmod 600 /etc/pgbackrest.conf;
+
+	Add below line of code in postgresql.conf
+
+	sudo vi /var/lib/postgresql/16/data/postgresql.conf
+	archive_mode = on
+archive_command = 'pgbackrest --config=/etc/pgbackrest.conf --stanza=standalone archive-push %p'
+
+	
+	sudo systemctl restart alloydbomni-16
+	
+	
+
+Set up passwordless SSH setup. 
+
+To enable remote backups and restores, the pgbackrest and postgres users require reciprocal passwordless SSH access.
+
+Login to Backup VM and DB VM and run below command to generate ssh key
+By running below command
+sudo -u -i postgres / sudo -u -i pgbackrest 
+ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa
+
+Copy id_rsa.pub from one VM to Another VM to this file vi ~/id_rsa.pub
+Then run below command on both VM
+cat ~/id_rsa.pub >> ~/.ssh/authorized_keys
+
+Verify passwordless ssh access using below command
+
+ssh pgbackrest@{{BACKUP_HOST}}
+ssh postgres@{{DB_NODE}}
+
+
+Login To Backup VM
+
+	Create Stanza on Backup VM using below command
+
+	sudo -u pgbackrest pgbackrest --config=/etc/pgbackrest.conf --stanza=standalone stanza-create
+	sudo -u pgbackrest pgbackrest --config=/etc/pgbackrest.conf --stanza=standalone check
+
+
+Create Sample Data
+	PGPASSWORD=abcdefgh psql -h localhost -d postgres -U postgres;
+	CREATE DATABASE sampledb;
+	\c sampledb;
+	CREATE TABLE employees (
+    employee_id SERIAL PRIMARY KEY,
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    department VARCHAR(50),
+    salary NUMERIC(10, 2),
+    hire_date DATE DEFAULT CURRENT_DATE
+);
+INSERT INTO employees (first_name, last_name, department, salary)
+VALUES
+    ('Alice', 'Johnson', 'Engineering', 85000),
+    ('Bob', 'Smith', 'Sales', 60000),
+    ('Charlie', 'Williams', 'Marketing', 75000),
+    ('Diana', 'Brown', 'HR', 50000),
+    ('Eve', 'Davis', 'Engineering', 95000);
+
+
+Login to Backup VM:
+
+Take Full Backup
+sudo -u pgbackrest pgbackrest --config=/etc/pgbackrest.conf --stanza=standalone --type=full backup
+
+Now Add more data to DB:
+
+	INSERT INTO employees (first_name, last_name, department, salary)
+VALUES
+    	('Frank', 'Anderson', 'IT', 80000),
+    	('Grace', 'Taylor', 'Engineering', 88000);
+
+Now take Differential Backup:
+
+sudo -u pgbackrest pgbackrest --config=/etc/pgbackrest.conf --stanza=standalone --type=diff backup
+
+Now Add more data to DB:
+
+	INSERT INTO employees (first_name, last_name, department, salary)
+VALUES
+    	('Isaac', 'Newton', 'Research', 120000),
+    	('Tesla', 'Nikola', 'Engineering', 130000);
+
+
+Now take Incremental Backup:
+
+	sudo -u pgbackrest pgbackrest --config=/etc/pgbackrest.conf --stanza=standalone --type=incr backup
+
+Below command can be used to list all backup:
+
+[mehtaaman_google_com@aman-external1 ~]$ sudo -u pgbackrest pgbackrest --config=/etc/pgbackrest.conf --stanza=standalone info
+stanza: standalone
+    status: ok
+    cipher: none
+
+    db (current)
+        wal archive min/max (16): 000000010000000000000003/000000010000000000000011
+
+        full backup: 20250712-092119F
+            timestamp start/stop: 2025-07-12 09:21:19+00 / 2025-07-12 09:21:26+00
+            wal start/stop: 00000001000000000000000B / 00000001000000000000000B
+            database size: 90.1MB, database backup size: 90.1MB
+            repo1: backup set size: 7.7MB, backup size: 7.7MB
+
+        diff backup: 20250712-092119F_20250712-092316D
+            timestamp start/stop: 2025-07-12 09:23:16+00 / 2025-07-12 09:23:18+00
+            wal start/stop: 00000001000000000000000D / 00000001000000000000000D
+            database size: 90.1MB, database backup size: 16MB
+            repo1: backup set size: 7.7MB, backup size: 17KB
+            backup reference total: 1 full
+
+        incr backup: 20250712-092119F_20250712-092645I
+            timestamp start/stop: 2025-07-12 09:26:45+00 / 2025-07-12 09:26:47+00
+            wal start/stop: 00000001000000000000000F / 00000001000000000000000F
+            database size: 90.1MB, database backup size: 16MB
+            repo1: backup set size: 7.7MB, backup size: 16.5KB
+            backup reference total: 1 full, 1 diff
+
+        incr backup: 20250712-092119F_20250712-092731I
+            timestamp start/stop: 2025-07-12 09:27:31+00 / 2025-07-12 09:27:33+00
+            wal start/stop: 000000010000000000000011 / 000000010000000000000011
+            database size: 90.1MB, database backup size: 16MB
+            repo1: backup set size: 7.7MB, backup size: 17.2KB
+            backup reference total: 1 full, 1 diff, 1 incr
+[mehtaaman_google_com@aman-external1 ~]$ 
+
+
+
+Restore Data PITR:
+
+sudo systemctl stop alloydbomni-16;
+sudo rm -rf /var/lib/postgresql/16/data;
+sudo mkdir -p /var/lib/postgresql/16/data;
+sudo chown -R postgres:postgres /var/lib/postgresql/16/data;
+sudo chmod 0700 /var/lib/postgresql/16/data;
+
+sudo -u postgres pgbackrest --config=/etc/pgbackrest.conf --stanza=standalone  --type=time --target="2025-07-12 09:23:16" --target-action=promote restore
+
+sudo systemctl start alloydbomni-16
+
+Able to see 7 records
+
+
+Setup Pgbouncer on DB Node:
+
+	sudo dnf install pgbouncer
+
+	Add below config in file /etc/pgbouncer/pgbouncer.ini
+	sudo rm /etc/pgbouncer/pgbouncer.ini
+	sudo vi /etc/pgbouncer/pgbouncer.ini
+	[pgbouncer]
+# Log settings
+logfile = /var/log/pgbouncer/pgbouncer.log
+pidfile = /var/run/pgbouncer/pgbouncer.pid
+# Network settings
+listen_addr = 0.0.0.0
+listen_port = 6432
+# Authentication settings
+auth_type = md5
+auth_file = /etc/pgbouncer/userlist.txt
+admin_users = postgres
+# Pooling settings
+pool_mode = transaction
+default_pool_size = 100
+reserve_pool_size = 20
+max_client_conn = 2000
+server_idle_timeout = 300
+# Connection retry and timeout settings
+query_timeout = 3600
+server_connect_timeout = 30
+server_login_retry = 10
+server_idle_timeout = 10
+server_reset_query = DISCARD ALL
+# TLS/SSL settings - Remove if not using HTTPS
+# client_tls = 1
+# client_tls_key_file = /etc/pgbouncer/server.key
+# client_tls_cert_file = /etc/pgbouncer/server.crt
+# client_tls_ca_file = /etc/pgbouncer/ca.crt
+[databases]
+* = host=127.0.0.1 port=5432
+
+Generate MD5 Hash by logging to postgres DB and run below query
+SELECT 'md5' || md5('<plain-text-password><username>');
+SELECT 'md5' || md5('mypasswordtestuser');
+	
+
+	Create user file
+	sudo vi /etc/pgbouncer/userlist.txt
+	"postgres" "md5e32ec1ffd4ac45421106f49872f390a3"
+
+
+sudo chmod 600 /etc/pgbouncer/userlist.txt
+sudo chown pgbouncer:pgbouncer /etc/pgbouncer/userlist.txt
+sudo mkdir -p /var/log/pgbouncer
+sudo chown pgbouncer:pgbouncer /var/log/pgbouncer
+	sudo systemctl enable pgbouncer
+	sudo systemctl start pgbouncer
+	sudo systemctl status pgbouncer
+
+Connect to Postgres DB using below command:
+
+[mehtaaman_google_com@aman-db1 ~]$ PGPASSWORD=abcdefgh psql -h 127.0.0.1 -p 6432 -U postgres -d postgres
+psql (16.9, server 16.8)
+Type "help" for help.
+
+postgres=# \l
+                                                            List of databases
+      Name       |    Owner     | Encoding | Locale Provider | Collate | Ctype | ICU Locale | ICU Rules |       Access privileges        
+-----------------+--------------+----------+-----------------+---------+-------+------------+-----------+--------------------------------
+ alloydbadmin    | alloydbadmin | UTF8     | icu             | C       | C     | und-x-icu  |           | 
+ alloydbmetadata | alloydbadmin | UTF8     | icu             | C       | C     | und-x-icu  |           | alloydbadmin=CTc/alloydbadmin +
+                 |              |          |                 |         |       |            |           | alloydbmetadata=c/alloydbadmin
+ postgres        | postgres     | UTF8     | icu             | C       | C     | und-x-icu  |           | 
+ sampledb        | postgres     | UTF8     | icu             | C       | C     | und-x-icu  |           | 
+ template0       | postgres     | UTF8     | icu             | C       | C     | und-x-icu  |           | =c/postgres                   +
+                 |              |          |                 |         |       |            |           | postgres=CTc/postgres
+ template1       | postgres     | UTF8     | icu             | C       | C     | und-x-icu  |           | =c/postgres                   +
+                 |              |          |                 |         |       |            |           | postgres=CTc/postgres
+(6 rows)
+
+postgres=# 
+
+
+
+Connect to pgbouncer DB using below command:
+
+[mehtaaman_google_com@aman-db1 ~]$ PGPASSWORD=abcdefgh psql -h 127.0.0.1 -p 6432 -U postgres -d pgbouncer
+psql (16.9, server 1.24.1/bouncer)
+WARNING: psql major version 16, server major version 1.24.
+         Some psql features might not work.
+Type "help" for help.
+
+pgbouncer=# SHOW POOLS;
+ database  |   user    | cl_active | cl_waiting | cl_active_cancel_req | cl_waiting_cancel_req | sv_active | sv_active_cancel | sv_being_canceled | sv_idle | sv_used | 
+sv_tested | sv_login | maxwait | maxwait_us | pool_mode | load_balance_hosts 
+-----------+-----------+-----------+------------+----------------------+-----------------------+-----------+------------------+-------------------+---------+---------+-
+----------+----------+---------+------------+-----------+--------------------
+ pgbouncer | pgbouncer |         1 |          0 |                    0 |                     0 |         0 |                0 |                 0 |       0 |       0 | 
+        0 |        0 |       0 |          0 | statement | 
+(1 row)
+
+pgbouncer=# 
+
+
+Setup SSL Communication:
+
+Create a Certificate Authority (CA)
+
+openssl genrsa -out root.key 4096;
+	openssl req -x509 -new -nodes -key root.key -sha256 -days 3650 -subj '/C=US/ST=CA/O=signer,Inc./CN=signer.com' -out root.crt;
+
+	Generate a Server Key for PostgreSQL
+
+	openssl genrsa -out postgres.key 2048;
+
+	Generate a CSR (certificate signing request) for PostgreSQL:
+
+	export san_entry=DNS:aman-db1,DNS:10.1.0.2,IP:10.1.0.2;
+echo -e "\n[alt_names]\nsubjectAltName=$san_entry" | tee -a myopenssl.cnf;
+openssl req -new -sha256 -key postgres.key -subj '/C=US/ST=CA/O=myorg,Inc./CN=google.com' -out postgres.csr -config myopenssl.cnf -reqexts alt_names;
+
+	Sign the server certificate using the CA:
+
+	openssl x509 -req -in postgres.csr -CA root.crt -CAkey root.key -CAcreateserial -out server.crt -days 365 -sha256 -extfile myopenssl.cnf -extensions alt_names;
+
+	sudo cp server.crt postgres.key /var/lib/postgresql/16/data;
+	sudo chown postgres:postgres /var/lib/postgresql/16/data/postgres.key;
+sudo chmod 0600 /var/lib/postgresql/16/data/postgres.key;
+	
+
+	Add below entry in /var/lib/postgresql/16/data/postgresql.conf
+	ssl = on
+ssl_cert_file = 'server.crt'
+ssl_key_file = 'postgres.key'
+
+
+	sudo systemctl restart alloydbomni-16;
+sudo systemctl status alloydbomni-16;
+
+
+	PGPASSWORD=abcdefgh psql -h localhost -d postgres -U postgres -v sslmode=verify-full -v sslrootcert=/home/mehtaaman_google_com/root.crt
+	PGPASSWORD=abcdefgh psql -h aman-db1 -d postgres -U postgres -v sslmode=verify-full -v sslrootcert=/home/mehtaaman_google_com/root.crt	
+
+
+
+Pgbouncer Performance Testing:
+Result: Performance using Pgbouncer is better than using postgres client
+sudo dnf install -y sysbench
+	sysbench \
+    --db-driver=pgsql \
+    --pgsql-host=10.1.0.2 \
+    --pgsql-port=5432 \
+    --pgsql-user=postgres \
+    --pgsql-password=abcdefgh \
+    --pgsql-db=sampledb \
+    oltp_common \
+    prepare
+	
+	Expected Outcome:
+	1. Higher TPS = better performance under load
+2. Higher QPS is typically an indicator of better query performance.
+3. Lower average latency and smaller standard deviation in PgBouncer results indicate better performance.
+4. Lower fairness standard deviation = better load balancing.
+
+
+
+Via Postgres
+	sysbench \
+    --db-driver=pgsql \
+    --pgsql-host=10.1.0.2 \
+    --pgsql-port=5432 \
+    --pgsql-user=postgres \
+    --pgsql-password=abcdefgh \
+    --pgsql-db=sampledb \
+    oltp_read_write \
+    --time=30 \
+    --threads=10 run
+
+	Output:
+	SQL statistics:
+    queries performed:
+        read:                            527884
+        write:                           148274
+        other:                           76749
+        total:                           752907
+    transactions:                        37112  (1236.82 per sec.)
+    queries:                             752907 (25091.83 per sec.)
+    ignored errors:                      594    (19.80 per sec.)
+    reconnects:                          0      (0.00 per sec.)
+
+General statistics:
+    total time:                          30.0044s
+    total number of events:              37112
+
+Latency (ms):
+         min:                                    2.64
+         avg:                                    8.08
+         max:                                 2005.26
+         95th percentile:                        5.18
+         sum:                               299954.34
+
+Threads fairness:
+    events (avg/stddev):           3711.2000/49.38
+    execution time (avg/stddev):   29.9954/0.00
+
+
+
+ 	Via Pgbouncer
+	sysbench \
+    --db-driver=pgsql \
+    --pgsql-host=10.1.0.2 \
+    --pgsql-port=6432 \
+    --pgsql-user=postgres \
+    --pgsql-password=abcdefgh \
+    --pgsql-db=sampledb \
+    oltp_read_write \
+    --time=30 \
+    --threads=10 run
+
+	Output:
+	
+SQL statistics:
+    queries performed:
+        read:                            565670
+        write:                           159289
+        other:                           82045
+        total:                           807004
+    transactions:                        39862  (1328.42 per sec.)
+    queries:                             807004 (26893.82 per sec.)
+    ignored errors:                      543    (18.10 per sec.)
+    reconnects:                          0      (0.00 per sec.)
+
+General statistics:
+    total time:                          30.0055s
+    total number of events:              39862
+
+Latency (ms):
+         min:                                    3.20
+         avg:                                    7.53
+         max:                                 1016.93
+         95th percentile:                        7.04
+         sum:                               299965.79
+
+Threads fairness:
+    events (avg/stddev):           3986.2000/22.42
+    execution time (avg/stddev):   29.9966/0.00
+
+
+
+Crash AlloyDB Process:
+	Result: Automatic Restarted
+
+[mehtaaman_google_com@aman-db1 ~]$ sudo systemctl status alloydbomni-16
+● alloydbomni-16.service - AlloyDB Omni Database server
+     Loaded: loaded (/usr/lib/systemd/system/alloydbomni-16.service; enabled; preset: disabled)
+     Active: active (running) since Sat 2025-07-12 16:58:32 UTC; 23h ago
+    Process: 142865 ExecStart=/usr/lib/postgresql/16/bin/pg_ctl start -D ${PGDATA} -p /usr/lib/postgresql/16/bin/postgres -w -t 60 (code=exited, status=0/SUCCESS)
+   Main PID: 142866 (postgres)
+[mehtaaman_google_com@aman-db1 ~]$ ps -ef|grep 142866
+postgres  142866       1  0 Jul12 ?        00:00:09 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/data
+[mehtaaman_google_com@aman-db1 ~]$ sudo kill -9 142866
+[mehtaaman_google_com@aman-db1 ~]$ sudo systemctl status alloydbomni-16
+● alloydbomni-16.service - AlloyDB Omni Database server
+     Loaded: loaded (/usr/lib/systemd/system/alloydbomni-16.service; enabled; preset: disabled)
+     Active: active (running) since Sun 2025-07-13 16:07:08 UTC; 2s ago
+    Process: 177911 ExecStart=/usr/lib/postgresql/16/bin/pg_ctl start -D ${PGDATA} -p /usr/lib/postgresql/16/bin/postgres -w -t 60 (code=exited, status=0/SUCCESS)
+   Main PID: 177912 (postgres)
+      Tasks: 23 (limit: 820800)
+     Memory: 6.2G
+        CPU: 6.226s
+     CGroup: /system.slice/alloydbomni-16.service
+
+[mehtaaman_google_com@aman-db1 ~]$ ps -ef|grep 177912
+postgres  177912       1 11 16:07 ?        00:00:02 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/data
+[mehtaaman_google_com@aman-db1 ~]$ PGPASSWORD=abcdefgh psql -h 10.1.0.2 -p 6432 -U postgres -d postgres
+psql (16.9, server 16.8)
+Type "help" for help.
+
+postgres=# exit
+[mehtaaman_google_com@aman-db1 ~]$ PGPASSWORD=abcdefgh psql -h 10.1.0.2 -U postgres -d postgres
+psql (16.9, server 16.8)
+SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off)
+Type "help" for help.
+
+postgres=# exit
+
+
